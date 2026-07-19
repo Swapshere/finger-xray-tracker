@@ -1,0 +1,393 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Finger X-Ray Tracker</title>
+<style>
+  :root{
+    --bg:#05060a;
+    --panel:#0d0f16;
+    --accent:#39ff88;
+    --accent2:#00d4ff;
+    --accent3:#ff3df0;
+    --text:#e8ecf1;
+    --muted:#8892a0;
+  }
+  *{box-sizing:border-box;}
+  body{
+    margin:0;
+    background:var(--bg);
+    color:var(--text);
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+    display:flex;
+    flex-direction:column;
+    align-items:center;
+    padding:20px;
+    min-height:100vh;
+  }
+  h1{
+    font-size:18px;
+    letter-spacing:0.08em;
+    text-transform:uppercase;
+    color:var(--muted);
+    margin:0 0 16px 0;
+    font-weight:600;
+  }
+  h1 span{color:var(--accent);}
+  .stage{
+    position:relative;
+    width:100%;
+    max-width:720px;
+    aspect-ratio:4/3;
+    background:#000;
+    border-radius:16px;
+    overflow:hidden;
+    box-shadow:0 0 0 1px #1c2030, 0 20px 60px rgba(0,0,0,0.6);
+  }
+  video{
+    position:absolute;
+    top:0;left:0;
+    width:100%;height:100%;
+    object-fit:cover;
+    transform:scaleX(-1);
+    opacity:0.55;
+  }
+  canvas{
+    position:absolute;
+    top:0;left:0;
+    width:100%;height:100%;
+  }
+  .overlay-msg{
+    position:absolute;
+    inset:0;
+    display:flex;
+    align-items:center;
+    justify-content:center;
+    text-align:center;
+    padding:24px;
+    color:var(--muted);
+    font-size:14px;
+    background:rgba(0,0,0,0.4);
+    z-index:5;
+  }
+  .controls{
+    width:100%;
+    max-width:720px;
+    margin-top:16px;
+    background:var(--panel);
+    border:1px solid #1c2030;
+    border-radius:14px;
+    padding:16px;
+    display:flex;
+    flex-wrap:wrap;
+    gap:10px;
+    align-items:center;
+  }
+  button{
+    background:#161925;
+    color:var(--text);
+    border:1px solid #262b3d;
+    padding:9px 16px;
+    border-radius:9px;
+    cursor:pointer;
+    font-size:13px;
+    font-weight:600;
+    transition:all .15s ease;
+  }
+  button:hover{border-color:var(--accent);color:var(--accent);}
+  button.active{
+    background:var(--accent);
+    color:#04140a;
+    border-color:var(--accent);
+  }
+  #startBtn{
+    background:linear-gradient(135deg,var(--accent),var(--accent2));
+    color:#04140a;
+    border:none;
+  }
+  .group{display:flex;gap:6px;flex-wrap:wrap;}
+  .label{
+    font-size:11px;
+    text-transform:uppercase;
+    letter-spacing:.06em;
+    color:var(--muted);
+    width:100%;
+    margin-top:4px;
+  }
+  .status{
+    font-size:12px;
+    color:var(--muted);
+    margin-top:10px;
+  }
+  .status b{color:var(--accent2);}
+</style>
+</head>
+<body>
+
+<h1>FINGER <span>X-RAY</span> TRACKER</h1>
+
+<div class="stage" id="stage">
+  <div class="overlay-msg" id="overlayMsg">Tap "Start Camera" below and allow webcam access.<br>Works best with your hand a foot or two from the camera, good lighting.</div>
+  <video id="video" playsinline autoplay muted></video>
+  <canvas id="canvas"></canvas>
+</div>
+
+<div class="controls">
+  <button id="startBtn">▶ Start Camera</button>
+
+  <div class="label">Shapes</div>
+  <div class="group">
+    <button class="shapeBtn active" data-shape="lines">Lines</button>
+    <button class="shapeBtn active" data-shape="triangles">Triangles</button>
+    <button class="shapeBtn active" data-shape="joints">Joints</button>
+    <button class="shapeBtn active" data-shape="dualLink">Hand Link</button>
+  </div>
+
+  <div class="label">Color</div>
+  <div class="group">
+    <button class="colorBtn active" data-color="#39ff88" style="border-color:#39ff88">Green</button>
+    <button class="colorBtn" data-color="#00d4ff" style="border-color:#00d4ff">Cyan</button>
+    <button class="colorBtn" data-color="#ff3df0" style="border-color:#ff3df0">Pink</button>
+    <button class="colorBtn" data-color="#ffb020" style="border-color:#ffb020">Amber</button>
+  </div>
+
+  <div class="status" id="status">Camera not started.</div>
+</div>
+
+<!-- MediaPipe Hands -->
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+
+<script>
+const video = document.getElementById('video');
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+const stage = document.getElementById('stage');
+const startBtn = document.getElementById('startBtn');
+const statusEl = document.getElementById('status');
+const overlayMsg = document.getElementById('overlayMsg');
+
+// ---- State ----
+let activeColor = '#39ff88';
+let activeShapes = { lines: true, triangles: true, joints: true, dualLink: true };
+let camera = null;
+let running = false;
+
+// Fingertip landmark indices (MediaPipe Hands): thumb, index, middle, ring, pinky
+const TIPS = [4, 8, 12, 16, 20];
+// Knuckle/base indices for a fuller skeleton look
+const HAND_CONNECTIONS = [
+  [0,1],[1,2],[2,3],[3,4],
+  [0,5],[5,6],[6,7],[7,8],
+  [5,9],[9,10],[10,11],[11,12],
+  [9,13],[13,14],[14,15],[15,16],
+  [13,17],[17,18],[18,19],[19,20],
+  [0,17]
+];
+
+function resizeCanvas(){
+  const rect = stage.getBoundingClientRect();
+  canvas.width = rect.width;
+  canvas.height = rect.height;
+}
+window.addEventListener('resize', resizeCanvas);
+
+function hexToRgba(hex, alpha){
+  const r = parseInt(hex.slice(1,3),16);
+  const g = parseInt(hex.slice(3,5),16);
+  const b = parseInt(hex.slice(5,7),16);
+  return `rgba(${r},${g},${b},${alpha})`;
+}
+
+// Convert normalized (0-1) MediaPipe coords to mirrored canvas pixel coords
+function toPx(pt){
+  return {
+    x: (1 - pt.x) * canvas.width,
+    y: pt.y * canvas.height
+  };
+}
+
+function drawGlowLine(a, b, color, width){
+  ctx.save();
+  ctx.shadowColor = color;
+  ctx.shadowBlur = 14;
+  ctx.strokeStyle = color;
+  ctx.lineWidth = width;
+  ctx.lineCap = 'round';
+  ctx.beginPath();
+  ctx.moveTo(a.x, a.y);
+  ctx.lineTo(b.x, b.y);
+  ctx.stroke();
+  ctx.restore();
+}
+
+function drawSkeleton(landmarks, color){
+  HAND_CONNECTIONS.forEach(([i,j])=>{
+    drawGlowLine(toPx(landmarks[i]), toPx(landmarks[j]), hexToRgba(color,0.35), 2);
+  });
+}
+
+function drawJoints(landmarks, color){
+  landmarks.forEach((pt, idx)=>{
+    const p = toPx(pt);
+    const isTip = TIPS.includes(idx);
+    ctx.save();
+    ctx.shadowColor = color;
+    ctx.shadowBlur = isTip ? 16 : 6;
+    ctx.fillStyle = isTip ? color : hexToRgba(color, 0.6);
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, isTip ? 6 : 3, 0, Math.PI*2);
+    ctx.fill();
+    ctx.restore();
+  });
+}
+
+function drawFingertipLines(landmarks, color){
+  const tips = TIPS.map(i => toPx(landmarks[i]));
+  for(let i=0;i<tips.length;i++){
+    for(let j=i+1;j<tips.length;j++){
+      drawGlowLine(tips[i], tips[j], hexToRgba(color,0.7), 1.5);
+    }
+  }
+}
+
+function drawTriangles(landmarks, color){
+  const tips = TIPS.map(i => toPx(landmarks[i]));
+  // thumb-index-middle and index-middle-ring and middle-ring-pinky
+  const tris = [[0,1,2],[1,2,3],[2,3,4]];
+  ctx.save();
+  ctx.shadowColor = color;
+  ctx.shadowBlur = 10;
+  tris.forEach(([a,b,c])=>{
+    ctx.beginPath();
+    ctx.moveTo(tips[a].x, tips[a].y);
+    ctx.lineTo(tips[b].x, tips[b].y);
+    ctx.lineTo(tips[c].x, tips[c].y);
+    ctx.closePath();
+    ctx.fillStyle = hexToRgba(color, 0.08);
+    ctx.strokeStyle = hexToRgba(color, 0.6);
+    ctx.lineWidth = 1.5;
+    ctx.fill();
+    ctx.stroke();
+  });
+  ctx.restore();
+}
+
+function drawDualHandLink(allLandmarks, color){
+  // Needs exactly two hands to make sense
+  if(allLandmarks.length < 2) return;
+  const [handA, handB] = allLandmarks;
+
+  // "Energy field" lines: each fingertip on hand A to the matching
+  // fingertip on hand B (thumb-thumb, index-index, etc.)
+  TIPS.forEach(i=>{
+    const a = toPx(handA[i]);
+    const b = toPx(handB[i]);
+    drawGlowLine(a, b, hexToRgba(color, 0.5), 1.5);
+  });
+
+  // One thicker "core" line between the two wrists (landmark 0),
+  // reads as the main connection between hands
+  drawGlowLine(toPx(handA[0]), toPx(handB[0]), hexToRgba(color, 0.9), 3);
+}
+
+function onResults(results){
+  ctx.clearRect(0,0,canvas.width, canvas.height);
+
+  if(!results.multiHandLandmarks || results.multiHandLandmarks.length === 0){
+    statusEl.textContent = 'Camera live — no hand detected. Hold your hand up in frame.';
+    return;
+  }
+  const handCount = results.multiHandLandmarks.length;
+  statusEl.textContent = (activeShapes.dualLink && handCount < 2)
+    ? `Camera live — tracking ${handCount} hand(s). Show both hands for Hand Link.`
+    : `Camera live — tracking ${handCount} hand(s).`;
+
+  results.multiHandLandmarks.forEach(landmarks=>{
+    drawSkeleton(landmarks, activeColor);
+    if(activeShapes.joints) drawJoints(landmarks, activeColor);
+    if(activeShapes.lines) drawFingertipLines(landmarks, activeColor);
+    if(activeShapes.triangles) drawTriangles(landmarks, activeColor);
+  });
+
+  // Dual-hand link needs both hands present at once — draw it once,
+  // outside the per-hand loop above, using all detected hands together.
+  if(activeShapes.dualLink){
+    drawDualHandLink(results.multiHandLandmarks, activeColor);
+  }
+}
+
+const hands = new Hands({
+  locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`
+});
+hands.setOptions({
+  maxNumHands: 2,
+  modelComplexity: 1,
+  minDetectionConfidence: 0.4,
+  minTrackingConfidence: 0.4
+});
+hands.onResults(onResults);
+
+async function startCamera(){
+  try{
+    statusEl.textContent = 'Requesting camera access...';
+    const stream = await navigator.mediaDevices.getUserMedia({ video: { width:640, height:480 }, audio:false });
+    video.srcObject = stream;
+    await video.play();
+    resizeCanvas();
+    overlayMsg.style.display = 'none';
+
+    camera = new Camera(video, {
+      onFrame: async () => { await hands.send({image: video}); },
+      width: 640,
+      height: 480
+    });
+    camera.start();
+    running = true;
+    startBtn.textContent = '■ Stop Camera';
+    statusEl.textContent = 'Camera live — show your hand.';
+  }catch(err){
+    statusEl.textContent = 'Camera access failed: ' + err.message + '. Check browser permissions.';
+    overlayMsg.style.display = 'flex';
+    overlayMsg.textContent = 'Could not access camera. Please allow camera permission and try again.';
+  }
+}
+
+function stopCamera(){
+  if(camera) camera.stop();
+  if(video.srcObject){
+    video.srcObject.getTracks().forEach(t=>t.stop());
+    video.srcObject = null;
+  }
+  ctx.clearRect(0,0,canvas.width,canvas.height);
+  running = false;
+  startBtn.textContent = '▶ Start Camera';
+  statusEl.textContent = 'Camera stopped.';
+  overlayMsg.style.display = 'flex';
+  overlayMsg.textContent = 'Tap "Start Camera" to resume.';
+}
+
+startBtn.addEventListener('click', ()=>{
+  if(running) stopCamera(); else startCamera();
+});
+
+document.querySelectorAll('.shapeBtn').forEach(btn=>{
+  btn.addEventListener('click', ()=>{
+    const shape = btn.dataset.shape;
+    activeShapes[shape] = !activeShapes[shape];
+    btn.classList.toggle('active', activeShapes[shape]);
+  });
+});
+
+document.querySelectorAll('.colorBtn').forEach(btn=>{
+  btn.addEventListener('click', ()=>{
+    activeColor = btn.dataset.color;
+    document.querySelectorAll('.colorBtn').forEach(b=>b.classList.remove('active'));
+    btn.classList.add('active');
+  });
+});
+
+resizeCanvas();
+</script>
+</body>
+</html>
